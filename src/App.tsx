@@ -4,8 +4,16 @@ import { Plus, Save, Trash2, Calendar, Book, ChevronRight, Search, Menu, X, Clou
 import { DiaryEntry } from './types';
 import { GoogleGenAI } from "@google/genai";
 import { Solar, Lunar } from 'lunar-javascript';
+import { diaryApi } from './lib/supabase';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+// 延迟初始化AI实例，只在需要时才创建
+let aiInstance: GoogleGenAI | null = null;
+const getAI = () => {
+  if (!aiInstance && process.env.GEMINI_API_KEY) {
+    aiInstance = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  }
+  return aiInstance;
+};
 
 export default function App() {
   const [entries, setEntries] = useState<DiaryEntry[]>([]);
@@ -38,8 +46,7 @@ export default function App() {
 
   const fetchEntries = async () => {
     try {
-      const res = await fetch('/api/entries');
-      const data = await res.json();
+      const data = await diaryApi.getEntries();
       setEntries(data);
     } catch (err) {
       console.error('Failed to fetch entries:', err);
@@ -62,6 +69,11 @@ export default function App() {
   };
 
   const generateWarmTip = async () => {
+    const ai = getAI();
+    if (!ai) {
+      setWarmTip('愿你今天拥有明媚的心情。');
+      return;
+    }
     try {
       const solar = Solar.fromDate(new Date());
       const lunar = Lunar.fromSolar(solar);
@@ -79,6 +91,15 @@ export default function App() {
 
   const handleAiQuery = async (query: string, isChat: boolean = false) => {
     if (!query.trim()) return;
+    
+    const ai = getAI();
+    if (!ai) {
+      const errorMsg = '请先配置 GEMINI_API_KEY 以使用AI功能。';
+      if (isChat) setChatHistory(prev => [...prev, { role: 'ai', text: errorMsg }]);
+      else setAiAnswer(errorMsg);
+      return;
+    }
+    
     if (isChat) setIsAiLoading(true);
     else setAiAnswer(null);
 
@@ -117,6 +138,13 @@ ${context}
 
   const generateMoodEmoji = async (text: string) => {
     if (!text || text.length < 5) return;
+    
+    const ai = getAI();
+    if (!ai) {
+      setMoodEmoji('✨');
+      return;
+    }
+    
     setIsAnalyzing(true);
     try {
       const response = await ai.models.generateContent({
@@ -164,31 +192,26 @@ ${context}
     }
 
     try {
-      const method = selectedId ? 'PUT' : 'POST';
-      const url = selectedId ? `/api/entries/${selectedId}` : '/api/entries';
-      
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          title, 
-          content, 
-          mood_emoji: moodEmoji, 
-          weather, 
-          image_data: imageData 
-        }),
-      });
-      
-      const savedEntry = await res.json();
-      
+      const entryData = {
+        title: title || '无标题',
+        content: content || '',
+        mood_emoji: moodEmoji || '',
+        weather: weather || '',
+        image_data: imageData || '',
+        date: new Date().toISOString(),
+      };
+
       if (selectedId) {
-        setEntries(entries.map(e => e.id === selectedId ? savedEntry : e));
+        const updatedEntry = await diaryApi.updateEntry(selectedId, entryData);
+        setEntries(entries.map(e => e.id === selectedId ? updatedEntry : e));
       } else {
+        const savedEntry = await diaryApi.createEntry(entryData);
         setEntries([savedEntry, ...entries]);
         setSelectedId(savedEntry.id);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to save entry:', err);
+      alert('保存失败: ' + (err.message || '未知错误'));
     } finally {
       setTimeout(() => setIsSaving(false), 500);
     }
@@ -215,7 +238,7 @@ ${context}
     if (!confirm('确定要删除这篇日记吗？')) return;
     
     try {
-      await fetch(`/api/entries/${id}`, { method: 'DELETE' });
+      await diaryApi.deleteEntry(id);
       setEntries(entries.filter(e => e.id !== id));
       if (selectedId === id) {
         handleNew();
